@@ -19,3 +19,4 @@ numba==0.60.0
 # Async / Networking
 aiohttp==3.10.8
 uvloop==0.20.0; platform_system!="Windows"
+web3==6.20.1
