@@ -46,3 +46,8 @@ Thumbs.db
 *.bak
 *.pyc
 __pycache__/
+
+# dev backups e caches
+*.bak*
+*.pyc
+__pycache__/
