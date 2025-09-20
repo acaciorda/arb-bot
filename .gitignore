@@ -39,3 +39,10 @@ Thumbs.db
 *.db
 *.pem
 *.key
+# local backups
+*.bak
+
+# local
+*.bak
+*.pyc
+__pycache__/
