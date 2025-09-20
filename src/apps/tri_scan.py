@@ -1,52 +1,61 @@
 import argparse
-from loguru import logger
-from src.infra.config import load_config
-from src.io.cex_binance import BinancePublic
-from src.core.graph import build_edges, triangles
-from src.core.arb_engine import run_cycle
+import importlib
+import inspect
 
-DEFAULT_PAIRS = ["ETHUSDT","BTCUSDT","ETHBTC"]  # pode expandir depois
+CANDIDATES = ("tri_paths_scan", "tri_scan", "tri_paths", "scan", "run", "main")
+
+def resolve_from(modname: str):
+    mod = importlib.import_module(modname)
+    for name in CANDIDATES:
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            return mod, fn
+    return mod, None
+
+def call_by_sig(fn, **kwargs):
+    sig = inspect.signature(fn)
+    return fn(**{k: v for k, v in kwargs.items() if k in sig.parameters})
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS)
-    ap.add_argument("--start_ccy", default="USDT")
-    ap.add_argument("--start_qty", type=float, default=1000.0)
-    ap.add_argument("--fee_bps", type=float, default=10.0)       # taker ~0.10%
-    ap.add_argument("--min_edge", type=float, default=0.0005)    # 5 bps
-    args = ap.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--start_qty", type=float, required=True)
+    p.add_argument("--min_edge", type=float, default=0.0005)
+    p.add_argument("--fee_bps",   type=float, default=10.0)
+    p.add_argument("--fast", action="store_true")
+    args = p.parse_args()
 
-    cfg = load_config()
-    testnet = (str(cfg.get("BINANCE_TESTNET","true")).lower() == "true")
-    binance = BinancePublic(testnet=testnet)
+    # 1) tenta no arb_engine
+    mod, fn = resolve_from("src.core.arb_engine")
+    if not fn:
+        # 2) fallback para graph
+        mod, fn = resolve_from("src.core.graph")
+        if not fn:
+            raise ImportError(
+                f"Nenhuma função de scan encontrada em "
+                f"src.core.arb_engine ou src.core.graph. "
+                f"Tente expor uma das: {CANDIDATES}"
+            )
 
-    edges = build_edges(args.pairs)
-    cycles = triangles(edges)
-    if not cycles:
-        logger.warning("Nenhum ciclo possível a partir dos pares fornecidos.")
-        return
+    # parâmetro de execução rápida (se o destino aceitar)
+    fast_exec = None
+    if args.fast:
+        try:
+            from src.core.fastbook import taker_roundtrip as fast_roundtrip
+            fast_exec = fast_roundtrip
+        except Exception:
+            fast_exec = True  # sinaliza “modo rápido” genérico se a função aceitar
 
-    # baixa order books necessários
-    need = sorted({e.pair for c in cycles for e in c})
-    books = {s: binance.depth(s, limit=50) for s in need}
-
-    best = None
-    for cyc in cycles:
-        qty_out, edge = run_cycle(cyc, args.start_ccy, args.start_qty, books, args.fee_bps)
-        logger.info(f"{[e.pair+'-'+e.side for e in cyc]} -> out={qty_out:.6f}  edge={edge:.6%}")
-        if best is None or edge > best[2]:
-            best = (cyc, qty_out, edge)
-
-    if best:
-        cyc, qout, edge = best
-        msg = f"BEST {[e.pair+'-'+e.side for e in cyc]} | out={qout:.6f} | edge={edge:.6%}"
-        if edge >= args.min_edge:
-            try:
-                from src.utils import telegram_alert
-                telegram_alert(f"[ALFA] {msg}")
-            except Exception as e:
-                logger.error(f"telegram falhou: {e}")
-        logger.info(msg)
+    result = call_by_sig(
+        fn,
+        start_qty=args.start_qty,
+        min_edge=args.min_edge,
+        fee_bps=args.fee_bps,
+        send_alert=True,
+        once=True,
+        fast_exec=fast_exec,
+        fast=args.fast,   # cobre o caso em que a função usa --fast
+    )
+    return result
 
 if __name__ == "__main__":
     main()
